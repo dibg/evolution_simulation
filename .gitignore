@@ -1,0 +1,15 @@
+# Local virtualenv — rebuilt per-machine by run.sh / setup.sh, never copy it
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Packaged tarballs
+*.tar.gz
+
+# PyInstaller build — keep the release binary, ignore the rest
+build/
+dist/*
+!dist/predator-prey-evolution
+*.spec
