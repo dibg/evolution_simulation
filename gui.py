@@ -50,6 +50,7 @@ class UIState:
         self.tool = "inspect"        # inspect | prey | predator | flower
         self.show_vision = False
         self.show_panel = True       # is the right-hand settings panel open?
+        self.fullscreen = False
         self.selected = None
         self.status = "ready"
 
@@ -89,6 +90,7 @@ class App:
              ("↺ Reset", self.reset, None)],
             [("✖ Clear", self.clear, None),
              ("Vision cones", self.toggle_vision, lambda: self.state.show_vision)],
+            [("⛶ Fullscreen (F11)", self.toggle_fullscreen, lambda: self.state.fullscreen)],
             None,  # label: Spawn tool
             [("Inspect", lambda: self.set_tool("inspect"), lambda: self.state.tool == "inspect"),
              ("Prey", lambda: self.set_tool("prey"), lambda: self.state.tool == "prey")],
@@ -134,6 +136,16 @@ class App:
         # When the panel is hidden the simulation uses the full window width.
         self.sim_w = SIM_W if self.state.show_panel else WIN_W
         self.world.bounds = (self.sim_w, SIM_H)
+
+    def toggle_fullscreen(self):
+        self.state.fullscreen = not self.state.fullscreen
+        # SCALED keeps the logical 1280x800 surface (and remaps the mouse), so the
+        # whole layout/click logic is unchanged — SDL just scales it to the screen.
+        if self.state.fullscreen:
+            self.screen = pygame.display.set_mode(
+                (WIN_W, WIN_H), pygame.SCALED | pygame.FULLSCREEN)
+        else:
+            self.screen = pygame.display.set_mode((WIN_W, WIN_H))
 
     def reset(self):
         self.world = World(self.s, (self.sim_w, SIM_H))
@@ -185,8 +197,15 @@ class App:
             self.running = False
         elif event.type == pygame.KEYDOWN:
             k = event.key
-            if k in (pygame.K_ESCAPE, pygame.K_q):
+            if k == pygame.K_q:
                 self.running = False
+            elif k == pygame.K_ESCAPE:
+                if self.state.fullscreen:     # Esc leaves fullscreen first
+                    self.toggle_fullscreen()
+                else:
+                    self.running = False
+            elif k in (pygame.K_F11, pygame.K_f):
+                self.toggle_fullscreen()
             elif k == pygame.K_SPACE:
                 self.toggle_pause()
             elif k == pygame.K_r:
@@ -334,7 +353,7 @@ class App:
             ps = self.big.render("❚❚ PAUSED", True, (255, 210, 90))
             self.screen.blit(ps, (16, y))
         # controls hint
-        hint = "Space pause · 1-4 tools · click to spawn/inspect · V vision · P hide panel · R reset · +/- speed"
+        hint = "Space pause · 1-4 tools · click to spawn/inspect · V vision · P panel · F11 fullscreen · R reset · +/- speed"
         hs = self.small.render(hint, True, MUTED)
         bg = pygame.Surface((hs.get_width() + 16, hs.get_height() + 8), pygame.SRCALPHA)
         bg.fill((*HUD_BG, 190))

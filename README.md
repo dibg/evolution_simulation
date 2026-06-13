@@ -102,7 +102,7 @@ live in the panel.
 **Keyboard**
 - `Space` pause/resume · `R` reset · `C` clear all
 - `1` inspect · `2` prey · `3` predator · `4` flower
-- `V` toggle vision cones · `P` / `Tab` hide/show the settings panel · `+ / -` simulation speed · `Esc` / `Q` quit
+- `V` toggle vision cones · `P` / `Tab` hide/show the settings panel · `F11` fullscreen · `+ / -` simulation speed · `Esc` exits fullscreen / quits · `Q` quit
 
 The **hide ▸** button in the top-right corner collapses the settings panel so the
 simulation fills the whole window; while hidden it becomes **◂ settings** and stays
