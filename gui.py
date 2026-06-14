@@ -62,6 +62,45 @@ def _mix(a, b, t):
             int(a[2] + (b[2] - a[2]) * t))
 
 
+def _clampf(v, lo, hi):
+    return lo if v < lo else hi if v > hi else v
+
+
+def _detect_os_scale():
+    """Best-effort guess at the desktop's UI scaling so the app doesn't render
+    tiny on a HiDPI / fractionally-scaled display (SDL otherwise ignores it).
+
+    Honoured in order: an explicit PPE_SCALE override, the common toolkit env
+    hints, then X resources (Xft.dpi / 96). Falls back to 1.0 — the user can
+    always override with the 'UI scale' slider or Ctrl +/-.
+    """
+    env = os.environ.get("PPE_SCALE")
+    if env:
+        try:
+            return _clampf(float(env), 0.5, 3.0)
+        except ValueError:
+            pass
+    for var in ("GDK_DPI_SCALE", "QT_SCALE_FACTOR", "GDK_SCALE"):
+        v = os.environ.get(var)
+        if v:
+            try:
+                return _clampf(float(v), 0.5, 3.0)
+            except ValueError:
+                pass
+    try:
+        import subprocess
+        out = subprocess.run(["xrdb", "-query"], capture_output=True,
+                             text=True, timeout=1).stdout
+        for line in out.splitlines():
+            if line.startswith("Xft.dpi:"):
+                dpi = float(line.split(":", 1)[1].strip())
+                if dpi > 0:
+                    return _clampf(round(dpi / 96.0 * 4) / 4, 0.5, 3.0)
+    except Exception:
+        pass
+    return 1.0
+
+
 class UIState:
     def __init__(self):
         self.paused = False
@@ -78,9 +117,6 @@ class App:
     def __init__(self):
         pygame.init()
         pygame.display.set_caption("Predator–Prey Evolution")
-        self.win_w, self.win_h = DEFAULT_W, DEFAULT_H
-        self._windowed_size = (DEFAULT_W, DEFAULT_H)   # restored when leaving fullscreen
-        self.screen = pygame.display.set_mode((self.win_w, self.win_h), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("dejavusansmono,monospace", 14)
         self.small = pygame.font.SysFont("dejavusansmono,monospace", 13)
@@ -88,10 +124,16 @@ class App:
 
         self.state = UIState()
         self.s = load_settings()
-        self.sim_w = self.win_w - PANEL_W        # current sim-area width (grows when panel hidden)
-        self.sim_h = self.win_h
-        self.world = World(self.s, (self.sim_w, self.sim_h))
-        self.world.reset()
+        # Display scaling. Everything is laid out / drawn at a *logical* size
+        # (win_w x win_h) onto a canvas, which is then scaled up to the real
+        # window (phys_w x phys_h). scale = physical / logical pixels.
+        self._auto_scale = _detect_os_scale()
+        self.scale = self.s.ui_scale if self.s.ui_scale > 0 else self._auto_scale
+        self.phys_w, self.phys_h = self._initial_window_size()
+        self._windowed_size = (self.phys_w, self.phys_h)   # restored when leaving fullscreen
+        self.display = pygame.display.set_mode((self.phys_w, self.phys_h), pygame.RESIZABLE)
+
+        self.world = World(self.s, (1, 1))       # bounds set by _relayout()
         self.effects = []                        # live event animations
         self._painting = False                   # drag-to-paint with a spawn tool
         self._paint_last = (0.0, 0.0)
@@ -103,17 +145,77 @@ class App:
         self.toggle_btn = ui.Button(
             lambda: "hide ▸" if self.state.show_panel else "◂ settings",
             self.toggle_panel)
-        self._relayout()                         # sizes surfaces, panel and toggle
+        self._relayout()                         # sizes canvas, surfaces, panel, toggle
+        self.world.reset()                       # now that bounds are correct
+
+    # --- display scaling ---------------------------------------------------
+    def _initial_window_size(self):
+        """A physical window size that fits the desktop, scaled up so the logical
+        layout (1280x800-ish) stays comfortable at the detected UI scale."""
+        try:
+            sizes = pygame.display.get_desktop_sizes()
+            dw, dh = sizes[0] if sizes else (1920, 1080)
+        except Exception:
+            info = pygame.display.Info()
+            dw, dh = info.current_w or 1920, info.current_h or 1080
+        w = min(round(DEFAULT_W * self.scale), dw - 20)
+        h = min(round(DEFAULT_H * self.scale), dh - 80)
+        w = max(round(MIN_W * self.scale), int(w))
+        h = max(round(MIN_H * self.scale), int(h))
+        return int(w), int(h)
+
+    def _map(self, p):
+        """Physical mouse pos -> logical canvas coords."""
+        return (p[0] * self.win_w / self.phys_w, p[1] * self.win_h / self.phys_h)
+
+    def _xlate(self, event):
+        """Return a copy of a mouse event with its position mapped to logical
+        coords, so all the layout/click logic can stay in logical space."""
+        if event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP,
+                           pygame.MOUSEMOTION) and hasattr(event, "pos"):
+            d = dict(event.dict)
+            d["pos"] = self._map(event.pos)
+            if "rel" in d:
+                d["rel"] = (event.rel[0] * self.win_w / self.phys_w,
+                            event.rel[1] * self.win_h / self.phys_h)
+            return pygame.event.Event(event.type, d)
+        return event
+
+    def _apply_scale(self, scale):
+        self.scale = _clampf(scale, 0.5, 3.0)
+        self._relayout()
+
+    def _bump_scale(self, delta):
+        new = _clampf(round((self.scale + delta) / 0.25) * 0.25, 0.5, 3.0)
+        self.s.ui_scale = new            # becomes an explicit, saveable choice
+        self._apply_scale(new)
+        self.state.status = f"UI scale {new:.2f}"
+
+    def _sync_scale(self):
+        """Pick up scale changes from the settings slider (0 = auto). Skipped
+        while a slider is being dragged so we don't rebuild the panel mid-drag."""
+        if self.panel is not None and self.panel.drag is not None:
+            return
+        desired = self.s.ui_scale if self.s.ui_scale > 0 else self._auto_scale
+        desired = _clampf(desired, 0.5, 3.0)
+        if abs(desired - self.scale) > 1e-3:
+            self._apply_scale(desired)
 
     # --- layout ------------------------------------------------------------
     def _relayout(self):
-        """Recompute everything that depends on the window size. Called at start
-        and whenever the window is resized or the panel is shown/hidden."""
+        """Recompute everything that depends on size/scale. Called at start and
+        whenever the window is resized, the scale changes, or the panel toggles.
+
+        Layout happens in *logical* pixels (win_w x win_h = physical / scale);
+        the canvas is drawn there and scaled up to the physical window."""
+        self.win_w = max(1, round(self.phys_w / self.scale))
+        self.win_h = max(1, round(self.phys_h / self.scale))
         self.sim_h = self.win_h
         self.sim_w = (self.win_w - PANEL_W) if self.state.show_panel else self.win_w
         self.world.bounds = (self.sim_w, self.sim_h)
-        # full-window scratch + two reused alpha layers (cleared per frame):
-        # vision cones go *under* the creatures, event effects go *over* them.
+        # the logical canvas everything is drawn onto, plus two reused alpha
+        # layers (vision cones go *under* the creatures, effects go *over*).
+        self.screen = pygame.Surface((self.win_w, self.win_h))
         self.sim_surf = pygame.Surface((self.win_w, self.win_h))
         self._vision_overlay = pygame.Surface((self.win_w, self.win_h), pygame.SRCALPHA)
         self._fx_overlay = pygame.Surface((self.win_w, self.win_h), pygame.SRCALPHA)
@@ -127,11 +229,12 @@ class App:
         self.toggle_btn.rect = pygame.Rect(self.win_w - 100, 8, 92, 24)
 
     def _resize(self, w, h):
-        w, h = max(MIN_W, w), max(MIN_H, h)
-        if (w, h) == (self.win_w, self.win_h):
+        w = max(round(MIN_W * self.scale), w)
+        h = max(round(MIN_H * self.scale), h)
+        if (w, h) == (self.phys_w, self.phys_h):
             return
-        self.win_w, self.win_h = w, h
-        self.screen = pygame.display.set_mode((w, h), pygame.RESIZABLE)
+        self.phys_w, self.phys_h = w, h
+        self.display = pygame.display.set_mode((w, h), pygame.RESIZABLE)
         self._relayout()
 
     # --- toolbar -----------------------------------------------------------
@@ -198,11 +301,11 @@ class App:
             # Native fullscreen at the desktop resolution — set_mode((0, 0),
             # FULLSCREEN) asks SDL for the current desktop mode, so the world
             # fills the whole screen instead of being scaled up from 1280x800.
-            self._windowed_size = (self.win_w, self.win_h)
-            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            self._windowed_size = (self.phys_w, self.phys_h)
+            self.display = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
-            self.screen = pygame.display.set_mode(self._windowed_size, pygame.RESIZABLE)
-        self.win_w, self.win_h = self.screen.get_size()
+            self.display = pygame.display.set_mode(self._windowed_size, pygame.RESIZABLE)
+        self.phys_w, self.phys_h = self.display.get_size()
         self._relayout()
 
     def reset(self):
@@ -265,7 +368,7 @@ class App:
             best.alive = False
 
     def handle_event(self, event):
-        mouse = pygame.mouse.get_pos()
+        mouse = self._map(pygame.mouse.get_pos())
         self.mouse = mouse
         # The floating toggle is always interactive and takes priority.
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
@@ -311,9 +414,15 @@ class App:
             elif k == pygame.K_4:
                 self.set_tool("flower")
             elif k in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
-                self.s.sim_speed = min(8.0, round(self.s.sim_speed + 0.25, 2))
+                if pygame.key.get_mods() & pygame.KMOD_CTRL:
+                    self._bump_scale(+0.25)      # Ctrl + : larger UI / world
+                else:
+                    self.s.sim_speed = min(8.0, round(self.s.sim_speed + 0.25, 2))
             elif k in (pygame.K_MINUS, pygame.K_KP_MINUS):
-                self.s.sim_speed = max(0.0, round(self.s.sim_speed - 0.25, 2))
+                if pygame.key.get_mods() & pygame.KMOD_CTRL:
+                    self._bump_scale(-0.25)      # Ctrl - : smaller UI / world
+                else:
+                    self.s.sim_speed = max(0.0, round(self.s.sim_speed - 0.25, 2))
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
             if mx < self.sim_w:
@@ -498,6 +607,14 @@ class App:
             self.screen.blit(self.small.render("CONTROLS", True, ui.HEADER),
                              (self.win_w - PANEL_W + ui.PAD, 14))
         self.toggle_btn.draw(self.screen, self.small)   # always on top
+
+        # Composite the logical canvas onto the real (physical) window. When
+        # they match (scale == 1) it's a plain blit; otherwise scale it up.
+        if (self.win_w, self.win_h) == (self.phys_w, self.phys_h):
+            self.display.blit(self.screen, (0, 0))
+        else:
+            pygame.transform.smoothscale(self.screen, (self.phys_w, self.phys_h),
+                                         self.display)
         pygame.display.flip()
 
     def _draw_effects(self, overlay):
@@ -678,8 +795,9 @@ class App:
         while self.running:
             real_dt = self.clock.tick(FPS) / 1000.0
             for event in pygame.event.get():
-                self.handle_event(event)
-            self.mouse = pygame.mouse.get_pos()
+                self.handle_event(self._xlate(event))
+            self.mouse = self._map(pygame.mouse.get_pos())
+            self._sync_scale()
             self.update(real_dt)
             self._tick_effects(real_dt)
             self.render()

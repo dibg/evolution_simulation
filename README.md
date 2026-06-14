@@ -116,13 +116,20 @@ live in the panel.
 - `Space` pause/resume · `R` reset · `C` clear all
 - `1` inspect · `2` prey · `3` predator · `4` flower
 - `V` toggle vision cones · `G` toggle the live charts · `P` / `Tab` hide/show the
-  settings panel · `F11` fullscreen · `+ / -` simulation speed · `Esc` exits
-  fullscreen / quits · `Q` quit
+  settings panel · `F11` fullscreen · `+ / -` simulation speed · `Ctrl + / Ctrl -`
+  UI scale · `Esc` exits fullscreen / quits · `Q` quit
 
 The window is freely **resizable** — drag any edge and the world, panel and charts
 re-flow to fit (the simulation area simply gets bigger). **F11** switches to
 fullscreen at your **native desktop resolution** (not an upscaled 1280×800), and
 `Esc` drops back to the window.
+
+**HiDPI / display scaling:** the app auto-detects your desktop's UI scale (so it
+won't render tiny on a fractionally-scaled, e.g. 1.5×, display). If the guess is
+off, set it explicitly with the **UI scale** slider (top of the panel; `0` = auto),
+**Ctrl + / Ctrl -**, or the `PPE_SCALE` environment variable — then **Save cfg** to
+keep it. Everything is drawn on a logical canvas and scaled to the window, so the
+whole UI *and* the world grow together.
 
 The **hide ▸** button in the top-right corner collapses the settings panel so the
 simulation fills the whole window; while hidden it becomes **◂ settings** and stays

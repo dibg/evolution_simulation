@@ -23,6 +23,9 @@ CONFIG_PATH = os.path.join(_BASE, "config.json")   # where Save cfg writes
 
 @dataclass
 class Settings:
+    # --- Display ---
+    ui_scale: float = 0.0           # UI/world zoom (0 = auto-detect the desktop scale)
+
     # --- Time / simulation ---
     sim_speed: float = 1.0          # time multiplier (0 = frozen)
     lifespan: float = 300.0         # max age in seconds (default 5 minutes)
@@ -73,6 +76,9 @@ class Settings:
 # Curated sliders shown in the panel, grouped under headers.
 # Each entry: (key, label, lo, hi, step, is_int)
 SLIDER_GROUPS = [
+    ("Display", [
+        ("ui_scale", "UI scale (0=auto)", 0.0, 3.0, 0.25, False),
+    ]),
     ("Time / simulation", [
         ("sim_speed", "Sim speed", 0.0, 8.0, 0.25, False),
         ("lifespan", "Lifespan (s)", 30, 900, 10, True),
