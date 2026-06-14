@@ -22,6 +22,7 @@ FPS = 60
 SIM_BG = (18, 20, 28)
 GRID = (26, 29, 39)
 FLOWER = (236, 120, 192)
+FLOWER_ALT = (250, 174, 150)   # second petal tint; flowers lerp between the two
 FLOWER_CORE = (255, 232, 130)
 PREY_BASE = (60, 200, 110)
 PRED_BASE = (228, 84, 72)
@@ -35,13 +36,30 @@ PRED_TXT = (240, 130, 120)
 BAR_BG = (44, 48, 60)
 ENERGY_COL = (120, 200, 120)
 STAM_COL = (110, 170, 240)
+GRAPH_BG = (10, 12, 18)
 
 SPEED_DISP = (40.0, 200.0)  # range used to map speed gene -> brightness
+
+# Visual spec for each transient world event. (ttl, start-r, end-r, base-alpha,
+# fill?). Colour is chosen per event (species/flower) when the effect is spawned.
+FX_SPEC = {
+    "eat":   (0.45,  4, 15, 170, False),   # prey nibbles a flower
+    "kill":  (0.55,  5, 30, 190, True),    # predator catches prey — red pop
+    "birth": (0.70,  2, 22, 200, False),   # newborn appears
+    "death": (0.55,  4, 18, 150, False),   # starved / old age — grey puff
+}
 
 
 def _lerp_color(base, t):
     t = 0.0 if t < 0 else 1.0 if t > 1 else t
     return tuple(int(c + (255 - c) * 0.6 * t) for c in base)
+
+
+def _mix(a, b, t):
+    t = 0.0 if t < 0 else 1.0 if t > 1 else t
+    return (int(a[0] + (b[0] - a[0]) * t),
+            int(a[1] + (b[1] - a[1]) * t),
+            int(a[2] + (b[2] - a[2]) * t))
 
 
 class UIState:
@@ -50,6 +68,7 @@ class UIState:
         self.tool = "inspect"        # inspect | prey | predator | flower
         self.show_vision = False
         self.show_panel = True       # is the right-hand settings panel open?
+        self.show_graphs = True      # the live population / gene charts overlay
         self.fullscreen = False
         self.selected = None
         self.status = "ready"
@@ -71,6 +90,15 @@ class App:
         self.world = World(self.s, (self.sim_w, SIM_H))
         self.world.reset()
         self.sim_surf = pygame.Surface((WIN_W, SIM_H))   # full width; panel is drawn over the right strip
+        # Two reused full-size alpha layers (allocated once, cleared per frame):
+        # vision cones go *under* the creatures, event effects go *over* them.
+        # Reusing them avoids allocating a surface per-creature per-frame.
+        self._vision_overlay = pygame.Surface((WIN_W, SIM_H), pygame.SRCALPHA)
+        self._fx_overlay = pygame.Surface((WIN_W, SIM_H), pygame.SRCALPHA)
+        self.effects = []                        # live event animations
+        self._painting = False                   # drag-to-paint with a spawn tool
+        self._paint_last = (0.0, 0.0)
+        self.mouse = (0, 0)
 
         buttons, toolbar_h = self._build_toolbar()
         self.panel = ui.Panel(pygame.Rect(SIM_W, 0, PANEL_W, WIN_H),
@@ -89,8 +117,9 @@ class App:
             [("⏸ Pause/Play", self.toggle_pause, lambda: self.state.paused),
              ("↺ Reset", self.reset, None)],
             [("✖ Clear", self.clear, None),
-             ("Vision cones", self.toggle_vision, lambda: self.state.show_vision)],
-            [("⛶ Fullscreen (F11)", self.toggle_fullscreen, lambda: self.state.fullscreen)],
+             ("⛶ Fullscreen", self.toggle_fullscreen, lambda: self.state.fullscreen)],
+            [("Vision cones", self.toggle_vision, lambda: self.state.show_vision),
+             ("Charts", self.toggle_graphs, lambda: self.state.show_graphs)],
             None,  # label: Spawn tool
             [("Inspect", lambda: self.set_tool("inspect"), lambda: self.state.tool == "inspect"),
              ("Prey", lambda: self.set_tool("prey"), lambda: self.state.tool == "prey")],
@@ -128,6 +157,9 @@ class App:
     def toggle_vision(self):
         self.state.show_vision = not self.state.show_vision
 
+    def toggle_graphs(self):
+        self.state.show_graphs = not self.state.show_graphs
+
     def set_tool(self, tool):
         self.state.tool = tool
 
@@ -150,11 +182,13 @@ class App:
     def reset(self):
         self.world = World(self.s, (self.sim_w, SIM_H))
         self.world.reset()
+        self.effects.clear()
         self.state.selected = None
         self.state.status = "reset"
 
     def clear(self):
         self.world.clear()
+        self.effects.clear()
         self.state.selected = None
         self.state.status = "cleared"
 
@@ -184,8 +218,29 @@ class App:
                     best_d, best = d, c
         return best
 
+    def _delete_at(self, x, y):
+        """Right-click removal: kill the creature under the cursor (a small grey
+        puff marks the spot), else remove the nearest flower there."""
+        c = self._pick_creature(x, y)
+        if c is not None:
+            c.alive = False
+            self._add_effect("death", c.x, c.y, c.species)
+            if c is self.state.selected:
+                self.state.selected = None
+            return
+        best, best_d = None, 16.0 ** 2
+        for f in self.world.flowers:
+            if not f.alive:
+                continue
+            d = (f.x - x) ** 2 + (f.y - y) ** 2
+            if d < best_d:
+                best_d, best = d, f
+        if best is not None:
+            best.alive = False
+
     def handle_event(self, event):
         mouse = pygame.mouse.get_pos()
+        self.mouse = mouse
         # The floating toggle is always interactive and takes priority.
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
                 and self.toggle_btn.rect.collidepoint(event.pos):
@@ -214,6 +269,8 @@ class App:
                 self.clear()
             elif k == pygame.K_v:
                 self.toggle_vision()
+            elif k == pygame.K_g:
+                self.toggle_graphs()
             elif k in (pygame.K_p, pygame.K_TAB):
                 self.toggle_panel()
             elif k == pygame.K_1:
@@ -236,6 +293,53 @@ class App:
                     self.state.selected = self._pick_creature(mx, my)
                 else:
                     self.world.spawn(tool, float(mx), float(my))
+                    self._painting = True        # begin drag-to-paint
+                    self._paint_last = (mx, my)
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            self._painting = False
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+            mx, my = event.pos
+            if mx < self.sim_w:
+                self._delete_at(float(mx), float(my))
+        elif event.type == pygame.MOUSEMOTION:
+            mx, my = event.pos
+            # Holding the left button with a spawn tool paints a trail of them.
+            if self._painting and self.state.tool != "inspect" and mx < self.sim_w:
+                gap = 18.0 if self.state.tool == "flower" else 26.0
+                lx, ly = self._paint_last
+                if (mx - lx) ** 2 + (my - ly) ** 2 >= gap * gap:
+                    self.world.spawn(self.state.tool, float(mx), float(my))
+                    self._paint_last = (mx, my)
+
+    # --- effects -----------------------------------------------------------
+    def _add_effect(self, etype, x, y, species):
+        spec = FX_SPEC.get(etype)
+        if spec is None:
+            return
+        ttl, r0, r1, alpha, fill = spec
+        if etype == "eat":
+            col = FLOWER
+        elif etype == "kill":
+            col = PRED_BASE
+        elif etype == "birth":
+            col = PRED_BASE if species == "predator" else PREY_BASE
+        else:                                  # death
+            col = MUTED
+        # Cap concurrent effects so a high-speed burst can't pile up unbounded.
+        if len(self.effects) < 240:
+            self.effects.append([etype, x, y, 0.0, ttl, r0, r1, alpha, fill, col])
+
+    def _drain_events(self):
+        for ev in self.world.events:
+            etype, x, y, species = ev
+            self._add_effect(etype, x, y, species)
+
+    def _tick_effects(self, real_dt):
+        if not self.effects:
+            return
+        for e in self.effects:
+            e[3] += real_dt
+        self.effects = [e for e in self.effects if e[3] < e[4]]
 
     # --- simulation --------------------------------------------------------
     def update(self, real_dt):
@@ -247,6 +351,7 @@ class App:
         while remaining > 1e-6 and guard < 16:
             step = max_step if remaining > max_step else remaining
             self.world.step(step)
+            self._drain_events()             # capture every sub-step's events
             remaining -= step
             guard += 1
         sel = self.state.selected
@@ -254,7 +359,9 @@ class App:
             self.state.selected = None
 
     # --- rendering ---------------------------------------------------------
-    def _draw_vision(self, surf, c):
+    def _draw_vision(self, overlay, c):
+        """Draw one creature's vision cone onto the shared (already-cleared)
+        alpha overlay — no per-creature surface allocation."""
         half = self.world.half_angle
         vr = self.s.vision_range
         pts = [(c.x, c.y)]
@@ -265,26 +372,52 @@ class App:
             pts.append((c.x + math.cos(a) * vr, c.y + math.sin(a) * vr))
         col = PRED_BASE if c.species == "predator" else PREY_BASE
         try:
-            shade = pygame.Surface((WIN_W, SIM_H), pygame.SRCALPHA)
-            pygame.draw.polygon(shade, (*col, 26), pts)
-            surf.blit(shade, (0, 0))
+            pygame.draw.polygon(overlay, (*col, 26), pts)
         except ValueError:
             pass
 
+    def _body_points(self, x, y, heading, r, species):
+        """An arrowhead/teardrop pointing along the heading (predators a touch
+        sharper than prey), used for both real creatures and the cursor ghost."""
+        nose = 1.8 if species == "predator" else 1.5
+        spread = 2.45
+        cos, sin = math.cos, math.sin
+        return [
+            (x + cos(heading) * r * nose, y + sin(heading) * r * nose),
+            (x + cos(heading + spread) * r, y + sin(heading + spread) * r),
+            (x + cos(heading - spread) * r, y + sin(heading - spread) * r),
+        ]
+
     def _draw_creature(self, surf, c, base):
-        t = (c.genome.speed - SPEED_DISP[0]) / (SPEED_DISP[1] - SPEED_DISP[0])
-        col = _lerp_color(base, t)
         r = c.radius
         cx, cy = int(c.x), int(c.y)
-        if c.is_ready(self.s):
-            pygame.draw.circle(surf, READY_RING, (cx, cy), r + 4, 2)
+        # Hue brightness encodes the speed gene; darkness encodes low energy —
+        # so a fast, well-fed creature is vivid and a starving one is dim.
+        t = (c.genome.speed - SPEED_DISP[0]) / (SPEED_DISP[1] - SPEED_DISP[0])
+        col = _lerp_color(base, t)
+        e = c.energy / self.s.max_energy
+        e = 0.0 if e < 0 else 1.0 if e > 1 else e
+        shade = 0.4 + 0.6 * e
+        col = (int(col[0] * shade), int(col[1] * shade), int(col[2] * shade))
+        if c.is_ready(self.s):                       # fertile — gently pulsing ring
+            pulse = 4 + int(2.0 * (0.5 + 0.5 * math.sin(self.world.sim_time * 6.0)))
+            pygame.draw.circle(surf, READY_RING, (cx, cy), r + pulse, 2)
+        # Body: a filled circle plus a forward-pointing nose polygon.
         pygame.draw.circle(surf, col, (cx, cy), r)
-        # heading
-        hx = c.x + math.cos(c.heading) * (r + 5)
-        hy = c.y + math.sin(c.heading) * (r + 5)
-        pygame.draw.line(surf, (245, 245, 245), (cx, cy), (hx, hy), 2)
+        pygame.draw.polygon(surf, col, self._body_points(c.x, c.y, c.heading, r, c.species))
+        edge = _mix(col, (0, 0, 0), 0.35)
+        pygame.draw.circle(surf, edge, (cx, cy), r, 1)
         if c is self.state.selected:
             pygame.draw.circle(surf, SELECT, (cx, cy), r + 6, 2)
+
+    def _draw_flower(self, surf, f):
+        col = _mix(FLOWER, FLOWER_ALT, f.variant)
+        # a slow per-flower bloom pulse so a field of them shimmers slightly
+        pulse = 0.5 + 0.5 * math.sin(self.world.sim_time * 1.6 + f.variant * 6.28)
+        r = f.radius + int(pulse)
+        fx, fy = int(f.x), int(f.y)
+        pygame.draw.circle(surf, col, (fx, fy), r)
+        pygame.draw.circle(surf, FLOWER_CORE, (fx, fy), 2)
 
     def render(self):
         s = self.sim_surf
@@ -296,31 +429,83 @@ class App:
             pygame.draw.line(s, GRID, (0, gy), (self.sim_w, gy))
 
         for f in self.world.flowers:
-            pygame.draw.circle(s, FLOWER, (int(f.x), int(f.y)), f.radius)
-            pygame.draw.circle(s, FLOWER_CORE, (int(f.x), int(f.y)), 2)
+            self._draw_flower(s, f)
 
-        if self.state.show_vision:
-            for c in self.world.prey:
-                self._draw_vision(s, c)
-            for c in self.world.predators:
-                self._draw_vision(s, c)
-        elif self.state.selected is not None and self.state.selected.species != "flower":
-            self._draw_vision(s, self.state.selected)
+        # Vision cones: one shared, cleared-once alpha layer, blitted once.
+        show_all = self.state.show_vision
+        sel = self.state.selected
+        show_sel = (not show_all and sel is not None and sel.species != "flower")
+        if show_all or show_sel:
+            self._vision_overlay.fill((0, 0, 0, 0))
+            if show_all:
+                for c in self.world.prey:
+                    self._draw_vision(self._vision_overlay, c)
+                for c in self.world.predators:
+                    self._draw_vision(self._vision_overlay, c)
+            else:
+                self._draw_vision(self._vision_overlay, sel)
+            s.blit(self._vision_overlay, (0, 0))
 
         for c in self.world.prey:
             self._draw_creature(s, c, PREY_BASE)
         for c in self.world.predators:
             self._draw_creature(s, c, PRED_BASE)
 
+        # Event effects + cursor ghost go on the second shared alpha layer
+        # (over the creatures), again blitted once.
+        if self.effects or self._ghost_active():
+            self._fx_overlay.fill((0, 0, 0, 0))
+            self._draw_effects(self._fx_overlay)
+            self._draw_ghost(self._fx_overlay)
+            s.blit(self._fx_overlay, (0, 0))
+
         self.screen.blit(s, (0, 0))
         self._draw_hud()
         self._draw_inspector()
+        if self.state.show_graphs:
+            self._draw_graphs()
         if self.state.show_panel:
             self.panel.draw(self.screen, self.font, self.small)
             self.screen.blit(self.small.render("CONTROLS", True, ui.HEADER),
                              (SIM_W + ui.PAD, 14))
         self.toggle_btn.draw(self.screen, self.small)   # always on top
         pygame.display.flip()
+
+    def _draw_effects(self, overlay):
+        for etype, x, y, age, ttl, r0, r1, alpha, fill, col in self.effects:
+            p = age / ttl if ttl > 0 else 1.0
+            r = int(r0 + (r1 - r0) * p)
+            if r < 1:
+                continue
+            a = int(alpha * (1.0 - p))
+            if a <= 0:
+                continue
+            pos = (int(x), int(y))
+            if fill:
+                pygame.draw.circle(overlay, (*col, a), pos, r)
+            else:
+                pygame.draw.circle(overlay, (*col, a), pos, r, 2)
+
+    def _ghost_active(self):
+        mx, my = self.mouse
+        return (self.state.tool != "inspect" and mx < self.sim_w and 0 <= my < SIM_H)
+
+    def _draw_ghost(self, overlay):
+        """A translucent preview of what the active spawn tool will place."""
+        if not self._ghost_active():
+            return
+        mx, my = self.mouse
+        tool = self.state.tool
+        if tool == "flower":
+            pygame.draw.circle(overlay, (*FLOWER, 120), (mx, my), 5)
+            pygame.draw.circle(overlay, (*FLOWER, 70), (mx, my), 10, 1)
+            return
+        base = PRED_BASE if tool == "predator" else PREY_BASE
+        r = 8 if tool == "predator" else 6
+        pygame.draw.circle(overlay, (*base, 110), (mx, my), r)
+        pygame.draw.polygon(overlay, (*base, 110),
+                            self._body_points(mx, my, 0.0, r, tool))
+        pygame.draw.circle(overlay, (*base, 80), (mx, my), r + 4, 1)
 
     def _bar(self, x, y, w, frac, col):
         frac = 0.0 if frac < 0 else 1.0 if frac > 1 else frac
@@ -353,7 +538,8 @@ class App:
             ps = self.big.render("❚❚ PAUSED", True, (255, 210, 90))
             self.screen.blit(ps, (16, y))
         # controls hint
-        hint = "Space pause · 1-4 tools · click to spawn/inspect · V vision · P panel · F11 fullscreen · R reset · +/- speed"
+        hint = ("Space pause · 1-4 tools · click spawn/inspect (drag to paint) · "
+                "right-click delete · V vision · G charts · P panel · F11 full · R reset · +/- speed")
         hs = self.small.render(hint, True, MUTED)
         bg = pygame.Surface((hs.get_width() + 16, hs.get_height() + 8), pygame.SRCALPHA)
         bg.fill((*HUD_BG, 190))
@@ -372,9 +558,13 @@ class App:
         self.screen.blit(box, (x, y))
         pygame.draw.rect(self.screen, ui.BORDER, (x, y, w, h), 1)
         col = PRED_TXT if c.species == "predator" else PREY_TXT
+        state_label = {
+            "wander": "wandering", "flee": "fleeing!", "chase": "chasing",
+            "seek_food": "seeking food", "seek_mate": "seeking mate",
+        }.get(c.state, c.state)
         rows = [
             (self.font, f"{c.species.upper()}  gen {c.generation}", col),
-            (self.small, f"age {c.age:4.0f}/{self.s.lifespan:.0f}s", MUTED),
+            (self.small, f"age {c.age:4.0f}/{self.s.lifespan:.0f}s   {state_label}", MUTED),
             (self.small, f"speed gene   {c.genome.speed:6.1f}", TEXT),
             (self.small, f"stamina gene {c.genome.stamina:6.1f}", TEXT),
             (self.small, f"food {c.food_count}/{quota}  "
@@ -391,6 +581,65 @@ class App:
         self._bar(x + 70, yy + 3, w - 90,
                   c.stamina / c.genome.stamina if c.genome.stamina else 0, STAM_COL)
 
+    # --- live charts -------------------------------------------------------
+    def _plot(self, surf, series, x, y, w, h, lo, hi, col):
+        n = len(series)
+        if n < 2 or hi <= lo:
+            return
+        span = hi - lo
+        denom = n - 1
+        pts = [(x + w * (i / denom),
+                y + h - 1 - (h - 1) * ((v - lo) / span))
+               for i, v in enumerate(series)]
+        pygame.draw.lines(surf, col, False, pts, 1)
+
+    def _draw_graphs(self):
+        hist = self.world.history
+        gw, gh = 300, 132
+        gx = self.sim_w - gw - 12
+        gy = SIM_H - gh - 46
+        box = pygame.Surface((gw, gh), pygame.SRCALPHA)
+        box.fill((*GRAPH_BG, 205))
+        self.screen.blit(box, (gx, gy))
+        pygame.draw.rect(self.screen, ui.BORDER, (gx, gy, gw, gh), 1)
+
+        pad = 8
+        cw = gw - 2 * pad
+        chart_h = 38
+        if len(hist) < 2:
+            self.screen.blit(self.small.render("charts: gathering data…", True, MUTED),
+                             (gx + pad, gy + pad))
+            return
+
+        prey = [d[0] for d in hist]
+        pred = [d[1] for d in hist]
+        pspd = [d[3] for d in hist]
+        xspd = [d[4] for d in hist]
+
+        # --- population over time ---
+        y0 = gy + pad + 14
+        self.screen.blit(self.small.render(
+            f"population   prey {prey[-1]}   pred {pred[-1]}", True, MUTED),
+            (gx + pad, gy + pad - 1))
+        pmax = max(max(prey), max(pred), 1)
+        self._plot(self.screen, prey, gx + pad, y0, cw, chart_h, 0, pmax, PREY_TXT)
+        self._plot(self.screen, pred, gx + pad, y0, cw, chart_h, 0, pmax, PRED_TXT)
+
+        # --- average speed gene over time ---
+        y1 = y0 + chart_h + 16
+        self.screen.blit(self.small.render(
+            f"avg speed   prey {pspd[-1]:.0f}   pred {xspd[-1]:.0f}", True, MUTED),
+            (gx + pad, y1 - 15))
+        vals = pspd + xspd
+        lo, hi = min(vals), max(vals)
+        if hi - lo < 1.0:                      # flat line — give it some headroom
+            lo, hi = lo - 5, hi + 5
+        else:
+            pad_v = (hi - lo) * 0.1
+            lo, hi = lo - pad_v, hi + pad_v
+        self._plot(self.screen, pspd, gx + pad, y1, cw, chart_h, lo, hi, PREY_TXT)
+        self._plot(self.screen, xspd, gx + pad, y1, cw, chart_h, lo, hi, PRED_TXT)
+
     # --- main loop ---------------------------------------------------------
     def run(self):
         self.running = True
@@ -401,7 +650,9 @@ class App:
             real_dt = self.clock.tick(FPS) / 1000.0
             for event in pygame.event.get():
                 self.handle_event(event)
+            self.mouse = pygame.mouse.get_pos()
             self.update(real_dt)
+            self._tick_effects(real_dt)
             self.render()
             frames += 1
             if max_frames is not None and frames >= max_frames:

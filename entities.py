@@ -27,12 +27,15 @@ def angle_to(src, dst):
 
 
 class Flower:
-    __slots__ = ("x", "y", "radius", "alive")
+    __slots__ = ("x", "y", "radius", "alive", "variant")
 
     def __init__(self, x, y):
         self.x = x
         self.y = y
-        self.radius = 4
+        # A per-flower seed (0..1) so the renderer can vary tint / size / petal
+        # phase — keeps a field of flowers from looking like identical dots.
+        self.variant = random.random()
+        self.radius = 4 + int(self.variant * 2)   # 4..5 px
         self.alive = True
 
 
@@ -111,6 +114,42 @@ class Creature:
             self.y = h - m
             self.heading = wrap_pi(-self.heading)
 
+    def _separate(self, grid):
+        """Gentle positional push so same-species creatures don't perfectly
+        overlap — purely cosmetic (run after steering, so it never changes who
+        flees/chases whom), but it makes a crowd read as many bodies, not a blob.
+        """
+        r = self.radius
+        for o in grid.query(self.x, self.y, r * 2):
+            if o is self or not o.alive:
+                continue
+            dx = self.x - o.x
+            dy = self.y - o.y
+            mind = r + o.radius
+            d2 = dx * dx + dy * dy
+            if d2 >= mind * mind:
+                continue
+            if d2 > 1e-9:
+                d = math.sqrt(d2)
+                push = (mind - d) * 0.5
+                self.x += dx / d * push
+                self.y += dy / d * push
+            else:                                  # exactly coincident — jitter apart
+                self.x += random.uniform(-1.0, 1.0)
+                self.y += random.uniform(-1.0, 1.0)
+
+    def _clamp(self, world):
+        w, h = world.bounds
+        r = self.radius
+        if self.x < r:
+            self.x = r
+        elif self.x > w - r:
+            self.x = w - r
+        if self.y < r:
+            self.y = r
+        elif self.y > h - r:
+            self.y = h - r
+
     def _metabolize(self, dt, s):
         gene_cost = s.metabolism * (0.4 * (self.genome.speed / 150.0)
                                     + 0.2 * (self.genome.stamina / 10.0))
@@ -163,7 +202,13 @@ class Prey(Creature):
                 self.wander(dt)
 
         self._move(dt, world)
+        self._separate(world.prey_grid)
+        self._clamp(world)
         self._metabolize(dt, s)
+
+        if not self.alive:                         # starved or died of old age
+            world.events.append(("death", self.x, self.y, "prey"))
+            return
 
         # Eat a flower we are touching.
         reach = self.radius + 4 + EAT_PAD
@@ -172,6 +217,7 @@ class Prey(Creature):
             flower.alive = False
             self.energy = min(s.max_energy, self.energy + s.flower_energy)
             self.food_count += 1
+            world.events.append(("eat", flower.x, flower.y, "prey"))
 
 
 class Predator(Creature):
@@ -202,13 +248,20 @@ class Predator(Creature):
             self.wander(dt)
 
         self._move(dt, world)
+        self._separate(world.predator_grid)
+        self._clamp(world)
         self._metabolize(dt, s)
+
+        if not self.alive:                         # starved or died of old age
+            world.events.append(("death", self.x, self.y, "predator"))
+            return
 
         # Catch and eat a prey we are touching.
         reach = self.radius + 6 + EAT_PAD
         victim = world.nearest(self, world.prey_grid, reach, lambda o: o.alive)
         if victim is not None:
             victim.alive = False
+            world.events.append(("kill", victim.x, victim.y, "prey"))
             self.energy = min(s.max_energy, self.energy + s.pred_eat_energy)
             self.food_count += 1
 

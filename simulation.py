@@ -3,10 +3,14 @@ growth, two-parent breeding, deaths and statistics. No rendering here.
 """
 import math
 import random
+from collections import deque
 
 from entities import Prey, Predator, Flower, make_creature
 from genome import crossover, mutate
 from spatial import SpatialGrid
+
+# How many per-second samples the rolling history keeps (for the live charts).
+HISTORY_LEN = 240
 
 
 class World:
@@ -26,6 +30,12 @@ class World:
         self.prey_grid = SpatialGrid(40)
         self.predator_grid = SpatialGrid(40)
         self.flower_grid = SpatialGrid(40)
+        # Transient one-step event log (eat / kill / birth / death) consumed by
+        # the renderer to spawn effects; cleared at the start of every step().
+        self.events = []
+        # Rolling time-series for the live charts: one sample per sim-second.
+        self.history = deque(maxlen=HISTORY_LEN)
+        self._hist_timer = 0.0
 
     # --- setup -------------------------------------------------------------
     def _rand_pos(self):
@@ -41,6 +51,9 @@ class World:
         self.generation = 0
         self.births = 0
         self.deaths = 0
+        self.events = []
+        self.history.clear()
+        self._hist_timer = 0.0
         s = self.s
         for _ in range(int(s.initial_flowers)):
             x, y = self._rand_pos()
@@ -88,8 +101,8 @@ class World:
             if d2 > vr2 or d2 >= best_d:
                 continue
             if not full_circle:
-                if abs(math.atan2(math.sin(math.atan2(dy, dx) - oh),
-                                  math.cos(math.atan2(dy, dx) - oh))) > half:
+                rel = math.atan2(dy, dx) - oh
+                if abs(math.atan2(math.sin(rel), math.cos(rel))) > half:
                     continue
             best_d = d2
             best = o
@@ -159,6 +172,7 @@ class World:
             used.add(id(a))
             used.add(id(mate))
             newborns.append(child)
+            self.events.append(("birth", child.x, child.y, species))
             self.generation = max(self.generation, gen)
         return newborns
 
@@ -166,6 +180,7 @@ class World:
         s = self.s
         self.half_angle = math.radians(s.vision_angle) * 0.5
         self.sim_time += dt
+        self.events = []          # fresh per step; the renderer drains it after
         self._build_grids()
 
         for c in self.prey:
@@ -199,6 +214,16 @@ class World:
                     self.flowers.append(Flower(x, y))
             if self.flower_timer > s.flower_interval:
                 self.flower_timer = self.flower_timer % s.flower_interval
+
+        # Sample the rolling history once per sim-second for the live charts.
+        self._hist_timer += dt
+        if self._hist_timer >= 1.0:
+            self._hist_timer -= 1.0
+            st = self.stats()
+            self.history.append((
+                st["prey"], st["predators"], st["flowers"],
+                st["prey_speed"], st["pred_speed"],
+            ))
 
     # --- statistics --------------------------------------------------------
     def stats(self):

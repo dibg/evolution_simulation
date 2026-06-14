@@ -84,6 +84,17 @@ On a fresh Mint/Ubuntu install you only need Python's venv/pip packages, which
   wear prey down), but mutation + natural selection push the genes over time.
   Watch the **avg speed / stamina** in the HUD drift across generations.
 
+**Reading the world at a glance**
+
+- Each creature is drawn as a little arrow pointing where it's headed; **brighter
+  = faster genes**, **dimmer = low on energy** (a starving creature visibly fades).
+- A pulsing **yellow ring** marks a fertile adult ready to breed.
+- Moments flash so you don't miss them: a pink ring when prey nibbles a flower, a
+  **red pop** when a predator makes a kill, a bright ring for a **birth**, and a
+  grey puff when something dies of hunger or old age.
+- The bottom-right **charts** (toggle with `G`) plot population and average speed
+  over the last few minutes — this is where you actually *see* selection happen.
+
 The default parameters produce a real predator–prey cycle: predators boom and
 crash the prey, prey recover, and after a few minutes prey usually "win" the
 arms race and predators fade. Keep them going by spawning more predators, raising
@@ -94,15 +105,19 @@ live in the panel.
 
 **Mouse**
 - Pick a **spawn tool** (Prey / Predator / Flower) in the panel, then **left-click
-  in the world** to place one.
-- **Inspect** tool: click a creature to see its genes, energy, stamina and
-  breeding progress in the bottom-left readout.
+  in the world** to place one. A translucent **ghost** previews what you'll drop.
+- **Drag** with a spawn tool held to *paint* a trail of creatures or flowers.
+- **Right-click** anywhere to delete the creature (or flower) under the cursor.
+- **Inspect** tool: click a creature to see its genes, energy, stamina, current
+  behaviour and breeding progress in the bottom-left readout.
 - Drag any **slider** to change a parameter live. Scroll the panel with the wheel.
 
 **Keyboard**
 - `Space` pause/resume · `R` reset · `C` clear all
 - `1` inspect · `2` prey · `3` predator · `4` flower
-- `V` toggle vision cones · `P` / `Tab` hide/show the settings panel · `F11` fullscreen · `+ / -` simulation speed · `Esc` exits fullscreen / quits · `Q` quit
+- `V` toggle vision cones · `G` toggle the live charts · `P` / `Tab` hide/show the
+  settings panel · `F11` fullscreen · `+ / -` simulation speed · `Esc` exits
+  fullscreen / quits · `Q` quit
 
 The **hide ▸** button in the top-right corner collapses the settings panel so the
 simulation fills the whole window; while hidden it becomes **◂ settings** and stays
