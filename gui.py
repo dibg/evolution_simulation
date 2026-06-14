@@ -296,15 +296,32 @@ class App:
         self._relayout()
 
     def toggle_fullscreen(self):
-        self.state.fullscreen = not self.state.fullscreen
-        if self.state.fullscreen:
-            # Native fullscreen at the desktop resolution — set_mode((0, 0),
-            # FULLSCREEN) asks SDL for the current desktop mode, so the world
-            # fills the whole screen instead of being scaled up from 1280x800.
-            self._windowed_size = (self.phys_w, self.phys_h)
-            self.display = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-        else:
-            self.display = pygame.display.set_mode(self._windowed_size, pygame.RESIZABLE)
+        want = not self.state.fullscreen
+        try:
+            if want:
+                # Native fullscreen at the desktop resolution. Pass the desktop
+                # size explicitly (the (0,0) "current mode" form is quirky on
+                # some window managers / Wayland) so the world fills the screen.
+                self._windowed_size = (self.phys_w, self.phys_h)
+                try:
+                    sizes = pygame.display.get_desktop_sizes()
+                    dw, dh = sizes[0] if sizes else (0, 0)
+                except Exception:
+                    dw, dh = 0, 0
+                self.display = pygame.display.set_mode((dw, dh), pygame.FULLSCREEN)
+            else:
+                self.display = pygame.display.set_mode(self._windowed_size, pygame.RESIZABLE)
+        except pygame.error as e:
+            # Some window managers refuse a mode change — stay where we are
+            # rather than taking the whole app down.
+            self.state.status = f"fullscreen failed: {e}"
+            self.display = pygame.display.set_mode(
+                (self.phys_w, self.phys_h), pygame.RESIZABLE)
+            self.state.fullscreen = False
+            self.phys_w, self.phys_h = self.display.get_size()
+            self._relayout()
+            return
+        self.state.fullscreen = want
         self.phys_w, self.phys_h = self.display.get_size()
         self._relayout()
 
@@ -609,12 +626,17 @@ class App:
         self.toggle_btn.draw(self.screen, self.small)   # always on top
 
         # Composite the logical canvas onto the real (physical) window. When
-        # they match (scale == 1) it's a plain blit; otherwise scale it up.
+        # they match (scale == 1) it's a plain blit; otherwise scale it up and
+        # blit (blit converts pixel formats, so this works even when the window
+        # surface has a different bit depth than the canvas — e.g. a 24-bit
+        # fullscreen surface on X11, which the dest-arg form of smoothscale
+        # would reject).
         if (self.win_w, self.win_h) == (self.phys_w, self.phys_h):
             self.display.blit(self.screen, (0, 0))
         else:
-            pygame.transform.smoothscale(self.screen, (self.phys_w, self.phys_h),
-                                         self.display)
+            self.display.blit(
+                pygame.transform.smoothscale(self.screen, (self.phys_w, self.phys_h)),
+                (0, 0))
         pygame.display.flip()
 
     def _draw_effects(self, overlay):
