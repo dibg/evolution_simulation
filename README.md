@@ -119,6 +119,11 @@ live in the panel.
   settings panel · `F11` fullscreen · `+ / -` simulation speed · `Esc` exits
   fullscreen / quits · `Q` quit
 
+The window is freely **resizable** — drag any edge and the world, panel and charts
+re-flow to fit (the simulation area simply gets bigger). **F11** switches to
+fullscreen at your **native desktop resolution** (not an upscaled 1280×800), and
+`Esc` drops back to the window.
+
 The **hide ▸** button in the top-right corner collapses the settings panel so the
 simulation fills the whole window; while hidden it becomes **◂ settings** and stays
 in the corner so you can bring the panel back.

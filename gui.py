@@ -13,9 +13,9 @@ from settings import load_settings, save_settings, reset_settings
 from simulation import World
 
 # --- window layout ---------------------------------------------------------
-WIN_W, WIN_H = 1280, 800
-PANEL_W = 300
-SIM_W, SIM_H = WIN_W - PANEL_W, WIN_H
+DEFAULT_W, DEFAULT_H = 1280, 800   # initial windowed size
+MIN_W, MIN_H = 720, 540            # smallest size the layout still works at
+PANEL_W = 300                      # the settings panel is a fixed-width strip
 FPS = 60
 
 # --- colours ---------------------------------------------------------------
@@ -78,37 +78,61 @@ class App:
     def __init__(self):
         pygame.init()
         pygame.display.set_caption("Predator–Prey Evolution")
-        self.screen = pygame.display.set_mode((WIN_W, WIN_H))
+        self.win_w, self.win_h = DEFAULT_W, DEFAULT_H
+        self._windowed_size = (DEFAULT_W, DEFAULT_H)   # restored when leaving fullscreen
+        self.screen = pygame.display.set_mode((self.win_w, self.win_h), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("dejavusansmono,monospace", 14)
         self.small = pygame.font.SysFont("dejavusansmono,monospace", 13)
         self.big = pygame.font.SysFont("dejavusansmono,monospace", 17, bold=True)
 
         self.state = UIState()
-        self.sim_w = SIM_W                       # current sim-area width (grows when panel hidden)
         self.s = load_settings()
-        self.world = World(self.s, (self.sim_w, SIM_H))
+        self.sim_w = self.win_w - PANEL_W        # current sim-area width (grows when panel hidden)
+        self.sim_h = self.win_h
+        self.world = World(self.s, (self.sim_w, self.sim_h))
         self.world.reset()
-        self.sim_surf = pygame.Surface((WIN_W, SIM_H))   # full width; panel is drawn over the right strip
-        # Two reused full-size alpha layers (allocated once, cleared per frame):
-        # vision cones go *under* the creatures, event effects go *over* them.
-        # Reusing them avoids allocating a surface per-creature per-frame.
-        self._vision_overlay = pygame.Surface((WIN_W, SIM_H), pygame.SRCALPHA)
-        self._fx_overlay = pygame.Surface((WIN_W, SIM_H), pygame.SRCALPHA)
         self.effects = []                        # live event animations
         self._painting = False                   # drag-to-paint with a spawn tool
         self._paint_last = (0.0, 0.0)
         self.mouse = (0, 0)
+        self.panel = None
 
-        buttons, toolbar_h = self._build_toolbar()
-        self.panel = ui.Panel(pygame.Rect(SIM_W, 0, PANEL_W, WIN_H),
-                              self.s, buttons, toolbar_h)
         # Floating panel toggle — anchored to the top-right corner, always drawn
         # on top, so it stays clickable whether the panel is open or hidden.
         self.toggle_btn = ui.Button(
             lambda: "hide ▸" if self.state.show_panel else "◂ settings",
             self.toggle_panel)
-        self.toggle_btn.rect = pygame.Rect(WIN_W - 100, 8, 92, 24)
+        self._relayout()                         # sizes surfaces, panel and toggle
+
+    # --- layout ------------------------------------------------------------
+    def _relayout(self):
+        """Recompute everything that depends on the window size. Called at start
+        and whenever the window is resized or the panel is shown/hidden."""
+        self.sim_h = self.win_h
+        self.sim_w = (self.win_w - PANEL_W) if self.state.show_panel else self.win_w
+        self.world.bounds = (self.sim_w, self.sim_h)
+        # full-window scratch + two reused alpha layers (cleared per frame):
+        # vision cones go *under* the creatures, event effects go *over* them.
+        self.sim_surf = pygame.Surface((self.win_w, self.win_h))
+        self._vision_overlay = pygame.Surface((self.win_w, self.win_h), pygame.SRCALPHA)
+        self._fx_overlay = pygame.Surface((self.win_w, self.win_h), pygame.SRCALPHA)
+        # the panel/toolbar geometry is anchored to the right edge → rebuild it,
+        # preserving the user's current scroll position.
+        prev_scroll = self.panel.scroll if self.panel is not None else 0.0
+        buttons, toolbar_h = self._build_toolbar()
+        self.panel = ui.Panel(pygame.Rect(self.win_w - PANEL_W, 0, PANEL_W, self.win_h),
+                              self.s, buttons, toolbar_h)
+        self.panel.scroll = prev_scroll
+        self.toggle_btn.rect = pygame.Rect(self.win_w - 100, 8, 92, 24)
+
+    def _resize(self, w, h):
+        w, h = max(MIN_W, w), max(MIN_H, h)
+        if (w, h) == (self.win_w, self.win_h):
+            return
+        self.win_w, self.win_h = w, h
+        self.screen = pygame.display.set_mode((w, h), pygame.RESIZABLE)
+        self._relayout()
 
     # --- toolbar -----------------------------------------------------------
     def _build_toolbar(self):
@@ -131,7 +155,7 @@ class App:
             [("⟲ Reset settings to defaults", self.reset_defaults, None)],
         ]
         buttons = []
-        x0 = SIM_W + ui.PAD
+        x0 = (self.win_w - PANEL_W) + ui.PAD
         w = PANEL_W - 2 * ui.PAD
         bw = (w - 8) // 2
         y = 38  # leave a top strip clear for the floating panel-toggle button
@@ -164,23 +188,25 @@ class App:
         self.state.tool = tool
 
     def toggle_panel(self):
-        self.state.show_panel = not self.state.show_panel
         # When the panel is hidden the simulation uses the full window width.
-        self.sim_w = SIM_W if self.state.show_panel else WIN_W
-        self.world.bounds = (self.sim_w, SIM_H)
+        self.state.show_panel = not self.state.show_panel
+        self._relayout()
 
     def toggle_fullscreen(self):
         self.state.fullscreen = not self.state.fullscreen
-        # SCALED keeps the logical 1280x800 surface (and remaps the mouse), so the
-        # whole layout/click logic is unchanged — SDL just scales it to the screen.
         if self.state.fullscreen:
-            self.screen = pygame.display.set_mode(
-                (WIN_W, WIN_H), pygame.SCALED | pygame.FULLSCREEN)
+            # Native fullscreen at the desktop resolution — set_mode((0, 0),
+            # FULLSCREEN) asks SDL for the current desktop mode, so the world
+            # fills the whole screen instead of being scaled up from 1280x800.
+            self._windowed_size = (self.win_w, self.win_h)
+            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
         else:
-            self.screen = pygame.display.set_mode((WIN_W, WIN_H))
+            self.screen = pygame.display.set_mode(self._windowed_size, pygame.RESIZABLE)
+        self.win_w, self.win_h = self.screen.get_size()
+        self._relayout()
 
     def reset(self):
-        self.world = World(self.s, (self.sim_w, SIM_H))
+        self.world = World(self.s, (self.sim_w, self.sim_h))
         self.world.reset()
         self.effects.clear()
         self.state.selected = None
@@ -250,6 +276,9 @@ class App:
             return
         if event.type == pygame.QUIT:
             self.running = False
+        elif event.type == pygame.VIDEORESIZE:
+            if not self.state.fullscreen:
+                self._resize(event.w, event.h)
         elif event.type == pygame.KEYDOWN:
             k = event.key
             if k == pygame.K_q:
@@ -424,8 +453,8 @@ class App:
         s.fill(SIM_BG)
         # subtle grid across the full simulation width
         for gx in range(0, self.sim_w, 80):
-            pygame.draw.line(s, GRID, (gx, 0), (gx, SIM_H))
-        for gy in range(0, SIM_H, 80):
+            pygame.draw.line(s, GRID, (gx, 0), (gx, self.sim_h))
+        for gy in range(0, self.sim_h, 80):
             pygame.draw.line(s, GRID, (0, gy), (self.sim_w, gy))
 
         for f in self.world.flowers:
@@ -467,7 +496,7 @@ class App:
         if self.state.show_panel:
             self.panel.draw(self.screen, self.font, self.small)
             self.screen.blit(self.small.render("CONTROLS", True, ui.HEADER),
-                             (SIM_W + ui.PAD, 14))
+                             (self.win_w - PANEL_W + ui.PAD, 14))
         self.toggle_btn.draw(self.screen, self.small)   # always on top
         pygame.display.flip()
 
@@ -488,7 +517,7 @@ class App:
 
     def _ghost_active(self):
         mx, my = self.mouse
-        return (self.state.tool != "inspect" and mx < self.sim_w and 0 <= my < SIM_H)
+        return (self.state.tool != "inspect" and mx < self.sim_w and 0 <= my < self.sim_h)
 
     def _draw_ghost(self, overlay):
         """A translucent preview of what the active spawn tool will place."""
@@ -543,8 +572,8 @@ class App:
         hs = self.small.render(hint, True, MUTED)
         bg = pygame.Surface((hs.get_width() + 16, hs.get_height() + 8), pygame.SRCALPHA)
         bg.fill((*HUD_BG, 190))
-        self.screen.blit(bg, (8, WIN_H - hs.get_height() - 14))
-        self.screen.blit(hs, (16, WIN_H - hs.get_height() - 10))
+        self.screen.blit(bg, (8, self.win_h - hs.get_height() - 14))
+        self.screen.blit(hs, (16, self.win_h - hs.get_height() - 10))
 
     def _draw_inspector(self):
         c = self.state.selected
@@ -597,7 +626,7 @@ class App:
         hist = self.world.history
         gw, gh = 300, 132
         gx = self.sim_w - gw - 12
-        gy = SIM_H - gh - 46
+        gy = self.sim_h - gh - 46
         box = pygame.Surface((gw, gh), pygame.SRCALPHA)
         box.fill((*GRAPH_BG, 205))
         self.screen.blit(box, (gx, gy))
