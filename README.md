@@ -75,31 +75,46 @@ On a fresh Mint/Ubuntu install you only need Python's venv/pip packages, which
 - **Energy / starvation:** every creature burns energy continuously (faster when
   sprinting and for higher-stat genomes). Eating refills it; at 0 energy it dies.
   Creatures also die of **old age** (lifespan) and prey die by being **eaten**.
-- **Breeding (two parents):** a prey that has eaten *4 flowers* and a predator
-  that has eaten *3 prey* become **fertile** (yellow ring). When two fertile
-  adults of the same species meet, a baby is born whose **speed & stamina genes
-  are a blend of both parents, plus mutation**. Both parents then pay an energy
-  cost and enter a cooldown.
-- **Evolution:** prey start fast (to escape) and predators start enduring (to
-  wear prey down), but mutation + natural selection push the genes over time.
-  Watch the **avg speed / stamina** in the HUD drift across generations.
+- **Satiation:** an animal only hunts / forages / eats while **hungry** (below the
+  *Forage below energy* threshold). A full predator ignores prey and a full prey
+  ignores flowers — so nothing over-harvests, which lets populations recover.
+- **Breeding (two parents):** once a creature has eaten its quota it becomes
+  **fertile** (yellow ring). Fertile adults actively roam to find a mate; when two
+  meet, a baby is born whose genes are a **blend of both parents, plus mutation**.
+  Both parents then pay an energy cost and enter a cooldown.
+- **Evolution (4 genes):** **speed** and **stamina** (movement), plus **size** and
+  **vision** (body & senses). Each gene costs energy to run — a bigger, faster,
+  farther-seeing animal burns more — so there's a real trade-off and the arms race
+  never fully settles. Watch the averages in the HUD drift across generations.
+
+**Forces that keep the ecosystem alive** (all tunable, set `0` to disable):
+
+- **Seasons:** food growth swings between *summer* (abundant) and *winter* (scarce)
+  on a cycle, driving perpetual boom/bust. The HUD shows the current season.
+- **Crowding (carrying capacity):** living in a packed area costs extra energy, so
+  population booms self-limit instead of overshooting into collapse.
+- **Disease / plagues:** infections (violet ring) spread between nearby animals and
+  are likelier in crowds, so a plague tends to erupt right when a population booms;
+  the sick burn energy fast and either recover or die.
 
 **Reading the world at a glance**
 
-- Each creature is drawn as a little arrow pointing where it's headed; **brighter
-  = faster genes**, **dimmer = low on energy** (a starving creature visibly fades).
+- Each creature is drawn as a little arrow pointing where it's headed; **bigger
+  body = bigger size gene**, **brighter = faster genes**, **dimmer = low on energy**
+  (a starving creature visibly fades), and a **violet ring = infected**.
 - A pulsing **yellow ring** marks a fertile adult ready to breed.
 - Moments flash so you don't miss them: a pink ring when prey nibbles a flower, a
-  **red pop** when a predator makes a kill, a bright ring for a **birth**, and a
-  grey puff when something dies of hunger or old age.
+  **red pop** when a predator makes a kill, a bright ring for a **birth**, a grey
+  puff for death by hunger/old age, and a **violet pop** for a plague death.
 - The bottom-right **charts** (toggle with `G`) plot population and average speed
   over the last few minutes — this is where you actually *see* selection happen.
 
-The default parameters produce a real predator–prey cycle: predators boom and
-crash the prey, prey recover, and after a few minutes prey usually "win" the
-arms race and predators fade. Keep them going by spawning more predators, raising
-their speed genes, increasing flower supply, or raising the mutation rate — all
-live in the panel.
+With the default parameters the ecosystem **sustains for the long haul** instead of
+collapsing: seasons, crowding, disease and satiation form feedback loops that keep
+prey and predators cycling for many minutes. Prey are robust; predators are the
+fragile top of the chain (as in real life) and may occasionally fade out — just
+spawn a few more, raise their genes, or soften disease/crowding in the panel. Want
+a faster, wilder ride? Turn seasons/disease up, mutation up, or satiation off.
 
 ## Controls
 
@@ -138,10 +153,13 @@ in the corner so you can bring the panel back.
 ## Parameters
 
 All knobs live in the panel (and in `config.json`, loaded at startup). Highlights:
-lifespan, flower growth rate / batch / cap, vision range & angle, prey panic
-radius, mutation rate, per-species speed & stamina spawn ranges, metabolism,
-energy per meal, breed cost & cooldown, breeding food quotas, and starting /
-maximum populations. **Save cfg** writes the current values back to `config.json`;
+UI scale, **satiation** (forage-below threshold), **seasons** (length & strength),
+**crowding** (radius & penalty), **disease** (spread rate/radius, severity,
+duration), lifespan, flower growth rate / batch / cap, vision range & angle, prey
+panic radius, mutation rate, per-species speed & stamina spawn ranges plus shared
+**size & vision** ranges, metabolism, energy per meal, breed cost & cooldown,
+breeding food quotas, and starting / maximum populations.
+**Save cfg** writes the current values back to `config.json`;
 **Load cfg** reloads them. Population sliders (and gene spawn ranges) take effect
 on the next **Reset**. **Reset settings to defaults** restores every parameter to
 its built-in value (independent of `config.json`).

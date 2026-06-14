@@ -36,6 +36,9 @@ class World:
         # Rolling time-series for the live charts: one sample per sim-second.
         self.history = deque(maxlen=HISTORY_LEN)
         self._hist_timer = 0.0
+        # Seasons: a food-supply multiplier that swings over time.
+        self.season_phase = 0.0     # -1 (deep winter) .. +1 (high summer)
+        self.food_mult = 1.0        # current multiplier on flower growth
 
     # --- setup -------------------------------------------------------------
     def _rand_pos(self):
@@ -54,6 +57,8 @@ class World:
         self.events = []
         self.history.clear()
         self._hist_timer = 0.0
+        self.season_phase = 0.0
+        self.food_mult = 1.0
         s = self.s
         for _ in range(int(s.initial_flowers)):
             x, y = self._rand_pos()
@@ -81,9 +86,10 @@ class World:
 
     # --- neighbour queries -------------------------------------------------
     def nearest_seen(self, observer, grid, predicate=None):
-        """Nearest entity inside the observer's vision cone."""
+        """Nearest entity inside the observer's vision cone. Range is per-creature
+        (the vision gene scales the global vision_range)."""
         s = self.s
-        vr = s.vision_range
+        vr = s.vision_range * observer.genome.vision
         vr2 = vr * vr
         half = self.half_angle
         full_circle = half >= math.pi
@@ -176,11 +182,53 @@ class World:
             self.generation = max(self.generation, gen)
         return newborns
 
+    def _spread_disease(self, dt):
+        """Infections jump between nearby same-species animals, plus rare
+        spontaneous sparks that are likelier in crowds — so plagues tend to
+        erupt right when a population booms."""
+        s = self.s
+        radius = s.disease_radius
+        r2 = radius * radius
+        rate = s.disease_rate
+        spark = rate * 0.01
+        rnd = random.random
+        for group, grid in ((self.prey, self.prey_grid),
+                            (self.predators, self.predator_grid)):
+            # transmit from those already sick at the start of the step (snapshot
+            # so a fresh infection can't chain across the whole group in one tick)
+            for c in [c for c in group if c.alive and c.infected]:
+                for o in grid.query(c.x, c.y, radius):
+                    if o is c or not o.alive or o.infected:
+                        continue
+                    dx = o.x - c.x
+                    dy = o.y - c.y
+                    if dx * dx + dy * dy <= r2 and rnd() < rate * dt:
+                        o.infected = True
+                        o.sick_time = 0.0
+                        self.events.append(("infect", o.x, o.y, o.species))
+            # spontaneous outbreaks, more likely the more crowded a creature is
+            for c in group:
+                if not c.alive or c.infected:
+                    continue
+                if rnd() < spark * (1.0 + 0.15 * c.crowd) * dt:
+                    c.infected = True
+                    c.sick_time = 0.0
+                    self.events.append(("infect", c.x, c.y, c.species))
+
     def step(self, dt):
         s = self.s
         self.half_angle = math.radians(s.vision_angle) * 0.5
         self.sim_time += dt
         self.events = []          # fresh per step; the renderer drains it after
+
+        # Seasons: a slow swing in how fast food grows (summer ↔ winter).
+        if s.season_length > 0 and s.season_amplitude > 0:
+            self.season_phase = math.sin(2.0 * math.pi * self.sim_time / s.season_length)
+            self.food_mult = max(0.0, 1.0 + s.season_amplitude * self.season_phase)
+        else:
+            self.season_phase = 0.0
+            self.food_mult = 1.0
+
         self._build_grids()
 
         for c in self.prey:
@@ -189,6 +237,9 @@ class World:
         for c in self.predators:
             if c.alive:
                 c.update(self, dt)
+
+        if s.disease_rate > 0:
+            self._spread_disease(dt)
 
         newborns_prey = self._breed(self.prey, self.prey_grid, int(s.max_prey), "prey")
         newborns_pred = self._breed(self.predators, self.predator_grid, int(s.max_predators), "predator")
@@ -208,7 +259,8 @@ class World:
         if s.flower_interval > 0:
             while self.flower_timer >= s.flower_interval and len(self.flowers) < s.max_flowers:
                 self.flower_timer -= s.flower_interval
-                grow = min(int(s.flower_batch), int(s.max_flowers) - len(self.flowers))
+                batch = max(0, round(s.flower_batch * self.food_mult))   # seasons scale supply
+                grow = min(batch, int(s.max_flowers) - len(self.flowers))
                 for _ in range(grow):
                     x, y = self._rand_pos()
                     self.flowers.append(Flower(x, y))
@@ -231,6 +283,8 @@ class World:
             if not group:
                 return 0.0
             return sum(getattr(c.genome, attr) for c in group) / len(group)
+        infected = (sum(1 for c in self.prey if c.infected)
+                    + sum(1 for c in self.predators if c.infected))
         return {
             "prey": len(self.prey),
             "predators": len(self.predators),
@@ -242,5 +296,10 @@ class World:
             "prey_stamina": avg(self.prey, "stamina"),
             "pred_speed": avg(self.predators, "speed"),
             "pred_stamina": avg(self.predators, "stamina"),
+            "prey_size": avg(self.prey, "size"),
+            "pred_size": avg(self.predators, "size"),
+            "infected": infected,
+            "season": self.season_phase,
+            "food_mult": self.food_mult,
             "time": self.sim_time,
         }

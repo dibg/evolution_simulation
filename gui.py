@@ -37,16 +37,21 @@ BAR_BG = (44, 48, 60)
 ENERGY_COL = (120, 200, 120)
 STAM_COL = (110, 170, 240)
 GRAPH_BG = (10, 12, 18)
+SICK_COL = (188, 96, 224)       # violet — disease marker / plague effect
+SUN_COL = (250, 206, 110)       # summer (food abundant)
+SNOW_COL = (150, 188, 240)      # winter (food scarce)
 
 SPEED_DISP = (40.0, 200.0)  # range used to map speed gene -> brightness
 
 # Visual spec for each transient world event. (ttl, start-r, end-r, base-alpha,
 # fill?). Colour is chosen per event (species/flower) when the effect is spawned.
 FX_SPEC = {
-    "eat":   (0.45,  4, 15, 170, False),   # prey nibbles a flower
-    "kill":  (0.55,  5, 30, 190, True),    # predator catches prey — red pop
-    "birth": (0.70,  2, 22, 200, False),   # newborn appears
-    "death": (0.55,  4, 18, 150, False),   # starved / old age — grey puff
+    "eat":    (0.45,  4, 15, 170, False),  # prey nibbles a flower
+    "kill":   (0.55,  5, 30, 190, True),   # predator catches prey — red pop
+    "birth":  (0.70,  2, 22, 200, False),  # newborn appears
+    "death":  (0.55,  4, 18, 150, False),  # starved / old age — grey puff
+    "infect": (0.50,  3, 14, 170, False),  # disease jumps to a creature — violet ring
+    "plague": (0.60,  4, 22, 180, True),   # died of disease — violet pop
 }
 
 
@@ -478,6 +483,8 @@ class App:
             col = PRED_BASE
         elif etype == "birth":
             col = PRED_BASE if species == "predator" else PREY_BASE
+        elif etype in ("infect", "plague"):
+            col = SICK_COL
         else:                                  # death
             col = MUTED
         # Cap concurrent effects so a high-speed burst can't pile up unbounded.
@@ -518,7 +525,7 @@ class App:
         """Draw one creature's vision cone onto the shared (already-cleared)
         alpha overlay — no per-creature surface allocation."""
         half = self.world.half_angle
-        vr = self.s.vision_range
+        vr = self.s.vision_range * c.genome.vision    # per-creature (vision gene)
         pts = [(c.x, c.y)]
         steps = 10
         start = c.heading - half
@@ -560,8 +567,8 @@ class App:
         # Body: a filled circle plus a forward-pointing nose polygon.
         pygame.draw.circle(surf, col, (cx, cy), r)
         pygame.draw.polygon(surf, col, self._body_points(c.x, c.y, c.heading, r, c.species))
-        edge = _mix(col, (0, 0, 0), 0.35)
-        pygame.draw.circle(surf, edge, (cx, cy), r, 1)
+        edge = SICK_COL if c.infected else _mix(col, (0, 0, 0), 0.35)
+        pygame.draw.circle(surf, edge, (cx, cy), r, 2 if c.infected else 1)
         if c is self.state.selected:
             pygame.draw.circle(surf, SELECT, (cx, cy), r + 6, 2)
 
@@ -684,12 +691,25 @@ class App:
     def _draw_hud(self):
         st = self.world.stats()
         t = int(st["time"])
+        ph = st["season"]
+        if ph > 0.33:
+            season_txt, season_col = "summer", SUN_COL
+        elif ph < -0.33:
+            season_txt, season_col = "winter", SNOW_COL
+        else:
+            season_txt, season_col = "mild", MUTED
+        if self.s.season_amplitude <= 0 or self.s.season_length <= 0:
+            season_txt, season_col = "—", MUTED
         lines = [
             (self.big, f"Prey {st['prey']}   Predators {st['predators']}   Flowers {st['flowers']}", TEXT),
             (self.small, f"gen {st['generation']}   time {t // 60:02d}:{t % 60:02d}   "
                          f"births {st['births']}  deaths {st['deaths']}", MUTED),
-            (self.small, f"prey  speed {st['prey_speed']:5.1f}  stamina {st['prey_stamina']:4.1f}", PREY_TXT),
-            (self.small, f"pred  speed {st['pred_speed']:5.1f}  stamina {st['pred_stamina']:4.1f}", PRED_TXT),
+            (self.small, f"prey  speed {st['prey_speed']:5.1f}  stam {st['prey_stamina']:4.1f}  "
+                         f"size {st['prey_size']:.2f}", PREY_TXT),
+            (self.small, f"pred  speed {st['pred_speed']:5.1f}  stam {st['pred_stamina']:4.1f}  "
+                         f"size {st['pred_size']:.2f}", PRED_TXT),
+            (self.small, f"season {season_txt}  food x{st['food_mult']:.2f}   "
+                         f"sick {st['infected']}", season_col),
             (self.small, f"speed x{self.s.sim_speed:.2f}   {self.clock.get_fps():4.0f} fps   "
                          f"tool: {self.state.tool}", MUTED),
         ]
@@ -719,8 +739,8 @@ class App:
         if c is None or not c.alive:
             return
         quota = getattr(self.s, c.quota_attr)
-        w, h = 230, 132
-        x, y = 8, 120
+        w, h = 230, 168
+        x, y = 8, 152
         box = pygame.Surface((w, h), pygame.SRCALPHA)
         box.fill((*HUD_BG, 215))
         self.screen.blit(box, (x, y))
@@ -730,11 +750,14 @@ class App:
             "wander": "wandering", "flee": "fleeing!", "chase": "chasing",
             "seek_food": "seeking food", "seek_mate": "seeking mate",
         }.get(c.state, c.state)
+        if c.infected:
+            state_label = "SICK"
         rows = [
-            (self.font, f"{c.species.upper()}  gen {c.generation}", col),
-            (self.small, f"age {c.age:4.0f}/{self.s.lifespan:.0f}s   {state_label}", MUTED),
-            (self.small, f"speed gene   {c.genome.speed:6.1f}", TEXT),
-            (self.small, f"stamina gene {c.genome.stamina:6.1f}", TEXT),
+            (self.font, f"{c.species.upper()}  gen {c.generation}", SICK_COL if c.infected else col),
+            (self.small, f"age {c.age:4.0f}/{self.s.lifespan:.0f}s   {state_label}",
+             SICK_COL if c.infected else MUTED),
+            (self.small, f"speed {c.genome.speed:6.1f}   stamina {c.genome.stamina:4.1f}", TEXT),
+            (self.small, f"size  {c.genome.size:5.2f}   vision  {c.genome.vision:4.2f}", TEXT),
             (self.small, f"food {c.food_count}/{quota}  "
                          f"{'READY' if c.is_ready(self.s) else 'growing'}", TEXT),
         ]
